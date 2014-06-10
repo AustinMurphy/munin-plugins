@@ -1,0 +1,205 @@
+#!/usr/bin/perl -w
+# -*- perl -*-
+
+=head1 NAME
+
+postfix_smtp_stats - Plugin to monitor the number and status 
+of mails delivery attempts by the postfix smtp process 
+
+=head1 CONFIGURATION
+
+Configuration parameters for /etc/munin/postfix_smtp_stats,
+if you need to override the defaults below:
+
+ [postfix_smtp_stats]
+  env.logdir  - Which logfile to use
+  env.logfile - What file to read in logdir
+
+=head2 DEFAULT CONFIGURATION
+
+ [postfix_smtp_stats]
+  env.logdir  /var/log
+  env.logfile mail.log
+
+=head1 AUTHOR
+
+Records show that the plugin was contributed by Nicolai Langfeldt in
+2003.  Nicolai can't find anything in his email about this and expects
+the plugin is based on the corresponding exim plugin - to which it now
+bears no resemblence.
+
+2014 ASM
+
+=head1 LICENSE
+
+GPLv2
+
+=head1 MAGIC MARKERS
+
+=begin comment
+
+These magic markers are used by munin-node-configure when installing
+munin-node.
+
+=end comment
+
+ #%# family=manual
+ #%# capabilities=autoconf
+
+=head1 RANDOM COMMENTS
+
+Would be cool if someone ported this to Munin::Plugin for both state
+file and log tailing.
+
+=cut
+
+my $statefile = $ENV{'MUNIN_PLUGSTATE'} . "/munin-plugin-postfix_smtp_stats.state";
+my $pos;
+my $attempts = {};
+my $LOGDIR  = $ENV{'logdir'}  || '/var/log';
+my $LOGFILE = $ENV{'logfile'} || 'mail.log';
+
+my $logfile = "$LOGDIR/$LOGFILE";
+
+if ( $ARGV[0] and $ARGV[0] eq "autoconf" )
+{
+    if (-d $LOGDIR)
+    {
+	if (-f $logfile)
+	{
+            if (-r $logfile)
+            {
+                print "yes\n";
+                exit 0;
+            }
+            else
+            {
+                print "no (logfile '$logfile' not readable)\n";
+            }
+	}
+	else
+	{
+	    print "no (logfile '$logfile' not found)\n";
+	}
+    }
+    else
+    {
+        print "no (could not find logdir '$LOGDIR')\n";
+    }
+
+    exit 0;
+}
+
+
+if ( -f $statefile)
+{
+    open (IN, '<', $statefile) or die "Unable to open state-file: $!\n";
+    if (<IN> =~ /^(\d+)/)
+    {
+	$pos = $1;
+    }
+    while (<IN>)
+    {
+    	if (/^([0-9a-z.\-]+):(\d+)$/)
+	{
+		$attempts->{$1} = $2;
+	}
+    }
+    close IN;
+}
+else {
+    # at least have sent and deferred stats, other stats will be added as they happen
+    $attempts->{sent} = 0;
+    $attempts->{deferred} = 0;
+    $attempts->{bounced} = 0;
+}
+
+if (! -f $logfile)
+{
+    foreach my $i (sort keys %{$attempts})
+    {
+    	print "$i.value U\n";
+    }
+    exit 0;
+}
+
+
+$startsize = (stat $logfile)[7];
+
+
+if (!defined $pos)
+{
+    # Initial run.
+    $pos = $startsize;
+}
+
+parseLogfile($logfile, $pos, $startsize);
+$pos = $startsize;
+
+if ( $ARGV[0] and $ARGV[0] eq "config" )
+{
+    print "graph_title Postfix SMTP delivery attempts\n";
+    print "graph_args --base 1000 -l 0\n";
+    print "graph_vlabel messages / \${graph_period}\n";
+    print "graph_scale  no\n";
+    #print "graph_total  Total\n";
+    print "graph_category postfix\n";
+    print "graph_period minute\n";
+    foreach my $i (sort keys %{$attempts})
+    {
+	    print "$i.label  $i\n";
+	    print "$i.type DERIVE\n";
+	    print "$i.draw AREASTACK\n";
+	    print "$i.min 0\n";
+    }
+    #print "connections.label connections\n";
+    #print "connections.type DERIVE\n";
+    #print "connections.draw LINE2\n";
+    #print "connections.min 0\n";
+    exit 0;
+}
+
+#print "connections.value $connections\n";
+foreach my $i (sort keys %{$attempts})
+{
+	print "$i.value ", $attempts->{$i}, "\n";
+}
+
+
+if(-l $statefile) {
+	die("$statefile is a symbolic link, refusing to touch it.");
+}				
+open (OUT, '>', $statefile) or die "Unable to open statefile: $!\n";
+print OUT "$pos\n";
+foreach my $i (sort keys %{$attempts})
+{
+	print OUT "$i:", $attempts->{$i}, "\n";
+}
+close OUT;
+
+
+
+sub parseLogfile 
+{    
+    my ($fname, $start, $stop) = @_;
+    open (LOGFILE, $fname)
+    	or die "Unable to open logfile $fname for reading: $!\n";
+    seek (LOGFILE, $start, 0)
+    	or die "Unable to seek to $start in $fname: $!\n";
+
+    while (tell (LOGFILE) < $stop) 
+    {
+	my $line = <LOGFILE>;
+	chomp ($line);
+
+        #print "LINE:  $line\n" ;
+
+	if ($line =~ /postfix\/smtp\[.* status=(\S+)/ )
+	{
+	    $attempts->{$1}++;
+	}
+    }
+    close(LOGFILE) or warn "Error closing $fname: $!\n";    
+}
+
+# vim:syntax=perl
