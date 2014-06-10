@@ -1,0 +1,223 @@
+#!/usr/bin/perl -w
+# -*- perl -*-
+
+=head1 NAME
+
+postfix_smtpd_stats - Plugin to monitor the number and status 
+of connections to the postfix smtpd process
+
+=head1 CONFIGURATION
+
+Configuration parameters for /etc/munin/postfix_smtpd_stats,
+if you need to override the defaults below:
+
+ [postfix_smtpd_stats]
+  env.logdir  - Which logfile to use
+  env.logfile - What file to read in logdir
+
+=head2 DEFAULT CONFIGURATION
+
+ [postfix_smtpd_stats]
+  env.logdir  /var/log
+  env.logfile mail.log
+
+=head1 AUTHOR
+
+Records show that the plugin was contributed by Nicolai Langfeldt in
+2003.  Nicolai can't find anything in his email about this and expects
+the plugin is based on the corresponding exim plugin - to which it now
+bears no resemblence.
+
+2014 ASM
+
+=head1 LICENSE
+
+GPLv2
+
+=head1 MAGIC MARKERS
+
+=begin comment
+
+These magic markers are used by munin-node-configure when installing
+munin-node.
+
+=end comment
+
+ #%# family=manual
+ #%# capabilities=autoconf
+
+=head1 RANDOM COMMENTS
+
+Would be cool if someone ported this to Munin::Plugin for both state
+file and log tailing.
+
+=cut
+
+my $statefile = $ENV{'MUNIN_PLUGSTATE'} . "/munin-plugin-postfix_smtpd_stats.state";
+my $pos;
+my $connections = 0;
+my $accepted = 0;
+#my $delivered = 0;
+my $rejects = {};
+my $LOGDIR  = $ENV{'logdir'}  || '/var/log';
+my $LOGFILE = $ENV{'logfile'} || 'mail.log';
+
+my $logfile = "$LOGDIR/$LOGFILE";
+
+if ( $ARGV[0] and $ARGV[0] eq "autoconf" )
+{
+    if (-d $LOGDIR)
+    {
+	if (-f $logfile)
+	{
+            if (-r $logfile)
+            {
+                print "yes\n";
+                exit 0;
+            }
+            else
+            {
+                print "no (logfile '$logfile' not readable)\n";
+            }
+	}
+	else
+	{
+	    print "no (logfile '$logfile' not found)\n";
+	}
+    }
+    else
+    {
+        print "no (could not find logdir '$LOGDIR')\n";
+    }
+
+    exit 0;
+}
+
+
+if ( -f $statefile)
+{
+    open (IN, '<', $statefile) or die "Unable to open state-file: $!\n";
+    if (<IN> =~ /^(\d+):(\d+):(\d+)/)
+    {
+	($pos, $connections, $accepted) = ($1, $2, $3);
+    }
+    while (<IN>)
+    {
+    	if (/^([0-9a-z.\-]+):(\d+)$/)
+	{
+		$rejects->{$1} = $2;
+	}
+    }
+    close IN;
+}
+
+if (! -f $logfile)
+{
+    print "connections.value U\n";
+    print "accepted.value U\n";
+    foreach my $i (sort keys %{$rejects})
+    {
+    	print "r$i.value U\n";
+    }
+    exit 0;
+}
+
+
+$startsize = (stat $logfile)[7];
+
+if (!defined $pos)
+{
+    # Initial run.
+    $pos = $startsize;
+}
+
+parseLogfile($logfile, $pos, $startsize);
+$pos = $startsize;
+
+if ( $ARGV[0] and $ARGV[0] eq "config" )
+{
+    print "graph_title Postfix SMTPD connections\n";
+    print "graph_args --base 1000 -l 0\n";
+    print "graph_vlabel connections / \${graph_period}\n";
+    print "graph_scale  no\n";
+    #print "graph_total  Total\n";
+    print "graph_category postfix\n";
+    print "graph_period minute\n";
+    print "accepted.label accepted\n";
+    print "accepted.type DERIVE\n";
+    print "accepted.draw AREA\n";
+    print "accepted.min 0\n";
+    foreach my $i (sort keys %{$rejects})
+    {
+	    print "r$i.label reject $i\n";
+	    print "r$i.type DERIVE\n";
+	    print "r$i.draw STACK\n";
+	    print "r$i.min 0\n";
+    }
+    print "connections.label connections\n";
+    print "connections.type DERIVE\n";
+    print "connections.draw LINE2\n";
+    print "connections.min 0\n";
+    exit 0;
+}
+
+print "connections.value $connections\n";
+print "accepted.value $accepted\n";
+foreach my $i (sort keys %{$rejects})
+{
+	print "r$i.value ", $rejects->{$i}, "\n";
+}
+
+
+if(-l $statefile) {
+	die("$statefile is a symbolic link, refusing to touch it.");
+}				
+open (OUT, '>', $statefile) or die "Unable to open statefile: $!\n";
+print OUT "$pos:$connections:$accepted\n";
+foreach my $i (sort keys %{$rejects})
+{
+	print OUT "$i:", $rejects->{$i}, "\n";
+}
+close OUT;
+
+
+
+sub parseLogfile 
+{    
+    my ($fname, $start, $stop) = @_;
+    open (LOGFILE, $fname)
+    	or die "Unable to open logfile $fname for reading: $!\n";
+    seek (LOGFILE, $start, 0)
+    	or die "Unable to seek to $start in $fname: $!\n";
+
+    while (tell (LOGFILE) < $stop) 
+    {
+	my $line = <LOGFILE>;
+	chomp ($line);
+
+        # connnections:
+	if ($line =~ /smtpd.* connect from /) 
+	{
+	    $connections++;
+	} 
+        # accepted:
+	if ($line =~ /smtpd.* [0-9A-Z]*: client=/) 
+	{
+	    $accepted++;
+	} 
+        # delivered:
+	#if ($line =~ /qmgr.*from=.*size=[0-9]*/) 
+	#{
+	#    $delivered++;
+	#} 
+	elsif ($line =~ /postfix\/smtpd.*proxy-reject: \S+ (\S+)/ ||
+	       $line =~ /postfix\/smtpd.*reject: \S+ \S+ \S+ (\S+)/ ||
+	       $line =~ /postfix\/cleanup.* reject: (\S+)/)
+	{
+	    $rejects->{$1}++;
+	}
+    }
+    close(LOGFILE) or warn "Error closing $fname: $!\n";    
+}
+
+# vim:syntax=perl
